@@ -12,7 +12,7 @@ using byte = unsigned char;
 class Allocator
 {
 public:
-    explicit Allocator(size_t numOfBytes = 0) : m_allocatedMemory(HEADER + numOfBytes + FOOTER, 0)
+    explicit Allocator(size_t numOfBytes = 1) : m_allocatedMemory(HEADER + numOfBytes + FOOTER, 0)
     {
         setSize(m_allocatedMemory.data(), numOfBytes);
         setSize(m_allocatedMemory.data() + HEADER + numOfBytes, numOfBytes);
@@ -25,61 +25,100 @@ public:
             // If not dirty, AND block size is atleast numOfBytes, then allocate.
             if(!isDirty(i) && memoryBlockSize(i) >= numOfBytes)
             {
-                // Set dirty bit to 1.
-                setDirty(i);                            // Dirty bit of header.
-                setDirty(i + HEADER + numOfBytes);      // DIrty bit of footer.
-                byte* nextBlockAddress = i + HEADER + numOfBytes + FOOTER;
+                // Set dirty bit to 1 and size to numOfBytes in both header and footer.
+                size_t originalSize = memoryBlockSize(i);
 
-                // setting next block size and dirty bit, if it exists.
-                if (nextBlockAddress < m_allocatedMemory.data() + m_allocatedMemory.size())
-                {
-                    // Set information of head and footer of next block. 
-                    size_t nextBlockSize = memoryBlockSize(i) - numOfBytes - HEADER - FOOTER;
+            /* CASE 1: Split block */
+            if (originalSize >= numOfBytes + HEADER + FOOTER + 1)
+            {
+                // allocated block
+                setSize(i, numOfBytes);
+                setDirty(i);
 
-                    // Set head information.
-                    setSize(nextBlockAddress, nextBlockSize);    
-                    setClean(nextBlockAddress);         // Set dirty bit to 0.
+                byte* allocatedFooter = i + HEADER + numOfBytes;
+                setSize(allocatedFooter, numOfBytes);
+                setDirty(allocatedFooter);
 
-                    // Set footer information.
-                    setSize(nextBlockAddress + HEADER + nextBlockSize, nextBlockSize);  
-                    *(reinterpret_cast<size_t*>(nextBlockAddress + HEADER + nextBlockSize)) = nextBlockSize;     
-                    setClean(nextBlockAddress + HEADER + nextBlockSize); // Set dirty bit to 0.
-                }
-                
-                return i + HEADER;                      // return pointer to block without the metadata section.
+                // remaining free block
+                byte* nextHeader = allocatedFooter + FOOTER;
+                size_t nextSize = originalSize - numOfBytes - HEADER - FOOTER;
+
+                setSize(nextHeader, nextSize);
+                setClean(nextHeader);
+
+                byte* nextFooter = nextHeader + HEADER + nextSize;
+                setSize(nextFooter, nextSize);
+                setClean(nextFooter);
             }
-            i +=  HEADER + memoryBlockSize(i) + FOOTER; // increment pointer to next memory block.
+            /* CASE 2: take the entire block */
+            else
+            {
+                setDirty(i);
+
+                byte* footer = i + HEADER + originalSize;
+                setDirty(footer);
+            }
+
+            return i + HEADER;
+            }
+
+            i += HEADER + memoryBlockSize(i) + FOOTER;
         }
         // if we get here, there is no memory available to allocate.
         return nullptr;
     }
 
-    void free(byte* ptr)
+void free(byte* ptr)
+{
+    byte* header = ptr - HEADER;
+    size_t size = memoryBlockSize(header);
+    byte* footer = header + HEADER + size;
+    if (!ptr || !isDirty(header)) return;
+
+    setClean(header);
+    setClean(footer);
+
+    // ---- backward coalescing ----
+    if (header != m_allocatedMemory.data())
     {
-        byte* headerPtr = ptr - HEADER;
-        byte* footerPtr = ptr + memoryBlockSize(headerPtr);
-        byte* prevFooterPtr = headerPtr - FOOTER;
-        byte* prevHeaderPtr = prevFooterPtr - memoryBlockSize(prevFooterPtr);
+        byte* prevFooter = header - FOOTER;
 
-        // Set both header and footer of current memory block to clean.
-        setClean(ptr);                                      // Header starting address.
-        setClean(footerPtr);                                // Footer starting address.
-
-        // Check if there is a memory block before current one. If there is, check if it's free. If it is, combine both free blocks into one block.
-        if(headerPtr != m_allocatedMemory.data() && !isDirty(prevFooterPtr))        
+        if (!isDirty(prevFooter))
         {
-
-            // Set size of header of current memory block and size of footer of previous memory block to zero, since we don't need this metadata anymore.
-            setSize(headerPtr, 0); 
-            setSize(prevFooterPtr, 0); 
-            setClean(prevFooterPtr);
-
-            // Set size of marginal headers and footers to combined blocks size, including the footer and header of the separate blocks.
-            size_t combinedSize = memoryBlockSize(prevFooterPtr) + FOOTER + HEADER + memoryBlockSize(headerPtr);
-            setSize(footerPtr, combinedSize);
-            setSize(prevHeaderPtr, combinedSize);
+            byte* prevHeader = prevFooter - memoryBlockSize(prevFooter);
+            mergeBlocks(prevHeader, header);
+            header = prevHeader; // set current header to previous header
         }
     }
+
+    // ---- forward coalescing ----
+    byte* nextHeader = header + HEADER + memoryBlockSize(header) + FOOTER;
+
+    if (nextHeader < m_allocatedMemory.data() + m_allocatedMemory.size())
+    {
+        if (!isDirty(nextHeader))
+        {
+            mergeBlocks(header, nextHeader);
+        }
+    }
+}
+
+    // Helper block merge function.
+    void mergeBlocks(byte* leftHeader, byte* rightHeader)
+{
+    size_t leftSize  = memoryBlockSize(leftHeader);
+    size_t rightSize = memoryBlockSize(rightHeader);
+
+    size_t newSize = leftSize + HEADER + FOOTER + rightSize;
+
+    byte* newFooter = rightHeader + HEADER + rightSize;
+
+    setSize(leftHeader, newSize);
+    setSize(newFooter, newSize);
+
+    setClean(leftHeader);
+    setClean(newFooter);
+}
 
 
     /* Extra functions */

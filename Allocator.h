@@ -1,6 +1,6 @@
 #include <vector>
-
-
+#include <thread>
+#include <mutex>
 
 // Allocator contains bytes structured as follows:
 // +----------------+---------------------------+----------------+
@@ -9,6 +9,8 @@
 
 
 using byte = unsigned char;
+std::mutex allocator_mutex;
+
 class Allocator
 {
 public:
@@ -20,6 +22,10 @@ public:
 
     void* allocate(size_t numOfBytes)
     {
+        if (numOfBytes == 0) return nullptr;
+    
+        std::lock_guard<std::mutex> guard { allocator_mutex };
+
         for(byte* i = m_allocatedMemory.data(); i < m_allocatedMemory.data() + m_allocatedMemory.size();)
         {
             // If not dirty, AND block size is atleast numOfBytes, then allocate.
@@ -70,10 +76,13 @@ public:
 
 void free(byte* ptr)
 {
+    std::lock_guard<std::mutex> guard { allocator_mutex };
+    
+    if (!ptr) return;
     byte* header = ptr - HEADER;
     size_t size = memoryBlockSize(header);
     byte* footer = header + HEADER + size;
-    if (!ptr || !isDirty(header)) return;
+    if (!isDirty(header)) return;
 
     setClean(header);
     setClean(footer);
@@ -87,7 +96,7 @@ void free(byte* ptr)
         {
             byte* prevHeader = prevFooter - memoryBlockSize(prevFooter);
             mergeBlocks(prevHeader, header);
-            header = prevHeader; // set current header to previous header
+            header = prevHeader;            // set current header to previous header.
         }
     }
 
